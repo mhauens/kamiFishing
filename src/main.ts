@@ -1454,8 +1454,9 @@ function renderHighscores(node: HTMLElement): void {
 }
 
 function renderSettings(node: HTMLElement): void {
-  const showGuestSettings = !game || game.mode === "guest";
-  const showTwitchSettings = !game || game.mode === "twitch";
+  const settingsMode: RunMode = game?.mode ?? (session.authenticated ? "twitch" : "guest");
+  const showGuestSettings = settingsMode === "guest";
+  const showTwitchSettings = settingsMode === "twitch";
   node.innerHTML = `
     <h2>Settings</h2>
     <p class="hint">Diese Werte bleiben lokal in deinem Browser. Gift-Sub-Events werden roh geholt und hier in Enten umgerechnet.</p>
