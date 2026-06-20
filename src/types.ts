@@ -4,6 +4,7 @@ export type UserSession = {
   authenticated: boolean;
   channelConnected: boolean;
   eventsubStatus?: string;
+  rewardStatus?: string;
   user?: {
     id: string;
     login: string;
@@ -17,7 +18,9 @@ export type GameSettings = {
   specialSubsPerDuck: number;
   guestDuckIntervalSeconds: number;
   twitchIdleDuckSeconds: number;
-  duckEventPollSeconds: number;
+  rewardCost: number;
+  rewardCooldownSeconds: number;
+  rewardMaxPerUserPerStream: number;
 };
 
 export type GiftEvent = {
@@ -26,6 +29,7 @@ export type GiftEvent = {
   displayName: string;
   total: number;
   anonymous: boolean;
+  twitchUserId?: string;
 };
 
 export type DuckVariant = "normal" | "special";
@@ -43,7 +47,8 @@ export type Duck = {
   variant: DuckVariant;
   catchableAt: number;
   caught: boolean;
-  source: "guest" | "gift" | "idle" | "start";
+  source: "guest" | "gift" | "idle" | "start" | "reward" | "chat";
+  twitchUserId?: string;
 };
 
 export type RunMode = "guest" | "twitch";
@@ -60,10 +65,30 @@ export type CatchRecord = {
 export type PendingGiftDuck = {
   eventId: string;
   name: string;
+  twitchUserId?: string;
   total: number;
   variant: DuckVariant;
   announceEvent: boolean;
   eventHasSpecial: boolean;
+};
+
+export type TwitchParticipant = {
+  twitchUserId: string;
+  displayName: string;
+};
+
+export type PendingTwitchDuck = {
+  id: string;
+  name: string;
+  twitchUserId: string;
+  source: "reward" | "chat";
+  redemptionId?: string;
+};
+
+export type RewardSettings = {
+  cost: number;
+  globalCooldownSeconds: number;
+  maxPerUserPerStream: number;
 };
 
 export type SavedRun = {
@@ -77,9 +102,13 @@ export type SavedRun = {
   catchCooldownUntil: number;
   lastGuestSpawnAt: number;
   lastGiftAt: number;
-  lastDuckQuerySince: number;
-  processedGiftIds: string[];
+  processedTwitchEventIds: string[];
+  processedGiftIds?: string[];
   pendingGiftDucks: PendingGiftDuck[];
+  pendingTwitchDucks: PendingTwitchDuck[];
+  raffleParticipants: TwitchParticipant[];
+  raffleEndsAt: number;
+  lastRaffleWinner?: string;
   pendingReplacementAt?: number[];
 };
 

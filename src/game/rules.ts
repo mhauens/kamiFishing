@@ -69,6 +69,7 @@ export function pendingGiftDucksFromEvent(
   return spawns.map((spawn, index) => ({
     eventId: event.id,
     name: spawn.name,
+    twitchUserId: event.twitchUserId,
     total: event.total,
     variant: spawn.variant,
     announceEvent: index === 0,

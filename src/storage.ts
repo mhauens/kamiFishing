@@ -9,7 +9,9 @@ const DEFAULT_SETTINGS: GameSettings = {
   specialSubsPerDuck: 10,
   guestDuckIntervalSeconds: 12,
   twitchIdleDuckSeconds: 60,
-  duckEventPollSeconds: 15
+  rewardCost: 1000,
+  rewardCooldownSeconds: 10,
+  rewardMaxPerUserPerStream: 1
 };
 
 export function loadSettings(): GameSettings {
@@ -36,7 +38,9 @@ export function normalizeSettings(settings: GameSettings): GameSettings {
     specialSubsPerDuck: sanitizeSettingsValue(settings.specialSubsPerDuck, 10, 1, 1000),
     guestDuckIntervalSeconds: sanitizeSettingsValue(settings.guestDuckIntervalSeconds, 12, 3, 120),
     twitchIdleDuckSeconds: sanitizeSettingsValue(settings.twitchIdleDuckSeconds, 60, 15, 900),
-    duckEventPollSeconds: sanitizeSettingsValue(settings.duckEventPollSeconds, 15, 10, 120)
+    rewardCost: sanitizeSettingsValue(settings.rewardCost, 1000, 1, 1_000_000),
+    rewardCooldownSeconds: sanitizeSettingsValue(settings.rewardCooldownSeconds, 10, 0, 86_400),
+    rewardMaxPerUserPerStream: sanitizeSettingsValue(settings.rewardMaxPerUserPerStream, 1, 0, 100)
   };
 }
 

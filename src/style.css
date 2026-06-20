@@ -150,6 +150,10 @@ canvas {
   line-height: 1.35;
 }
 
+.setting-disabled {
+  opacity: 0.58;
+}
+
 .score-list {
   display: grid;
   gap: 8px;

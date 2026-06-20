@@ -1,5 +1,15 @@
 import "./style.css";
-import { fetchGiftEvents, fetchServerSettings, fetchSession, logout, openTwitchPopup } from "./api";
+import {
+  fetchRewardSettings,
+  fetchServerSettings,
+  fetchSession,
+  fetchUnfulfilledRedemptions,
+  fulfillRedemptions,
+  logout,
+  openTwitchPopup,
+  registerTwitchEventSubSession,
+  updateRewardSettings
+} from "./api";
 import { ASSETS } from "./assets";
 import { moveAimTarget, moveAimTowardGoal } from "./game/aim";
 import { duckSizeForDepth, sortDucksBackToFront } from "./game/depth";
@@ -30,6 +40,16 @@ import {
   resetSkillCheck,
   type SkillCheckState
 } from "./game/skill";
+import {
+  RAFFLE_INTERVAL_MS,
+  TwitchEventSubClient,
+  TwitchTabLock,
+  addUniqueParticipant,
+  blockedTwitchUserIds,
+  drawRaffleWinner,
+  isDuckCommand,
+  type TwitchEventSubNotification
+} from "./game/twitch";
 import { clampToWater, moveDuckWithinWater, randomDuckWaterPoint } from "./game/water";
 import {
   addHighscore,
@@ -48,9 +68,11 @@ import type {
   GameSettings,
   GiftEvent,
   PendingGiftDuck,
+  PendingTwitchDuck,
   RunMode,
   SavedRun,
   Screen,
+  TwitchParticipant,
   UserSession
 } from "./types";
 
@@ -94,10 +116,12 @@ type GameState = {
   sparkles: SparkleEffect[];
   lastGuestSpawnAt: number;
   lastGiftAt: number;
-  lastDuckPollAt: number;
-  lastDuckQuerySince: number;
-  processedGiftIds: Set<string>;
+  processedTwitchEventIds: Set<string>;
   pendingGiftDucks: PendingGiftDuck[];
+  pendingTwitchDucks: PendingTwitchDuck[];
+  raffleParticipants: TwitchParticipant[];
+  raffleEndsAt: number;
+  lastRaffleWinner?: string;
   pendingReplacementAt: number[];
   cast: CastState;
   ended: boolean;
@@ -153,6 +177,9 @@ let selectedCatch: CatchRecord | null = null;
 let lastFrame = performance.now();
 let message = "";
 const pressedKeys = new Set<string>();
+let twitchEventSubClient: TwitchEventSubClient | null = null;
+let twitchTabLock: TwitchTabLock | null = null;
+let twitchConnectionStatus: "off" | "connecting" | "connected" | "error" | "locked" = "off";
 
 app.innerHTML = `
   <div class="shell">
@@ -221,6 +248,22 @@ window.addEventListener("message", async (event: MessageEvent) => {
   if (event.data?.type !== "kami:twitch-auth") return;
   session = await fetchSession();
   message = event.data.ok ? "Twitch verbunden." : event.data.error || "Twitch Login fehlgeschlagen.";
+  if (event.data.ok && session.authenticated) {
+    const reward = await fetchRewardSettings();
+    if (reward?.available && reward.settings) {
+      settings = saveSettings(
+        normalizeSettings({
+          ...settings,
+          rewardCost: reward.settings.cost,
+          rewardCooldownSeconds: reward.settings.globalCooldownSeconds,
+          rewardMaxPerUserPerStream: reward.settings.maxPerUserPerStream
+        })
+      );
+    } else if (reward?.reason === "affiliate-required") {
+      session.rewardStatus = "unavailable-403";
+      message = "Twitch verbunden. Kanalpunkte sind erst als Affiliate oder Partner verfügbar; !Ente funktioniert trotzdem.";
+    }
+  }
   renderOverlay();
 });
 
@@ -290,6 +333,7 @@ window.addEventListener("keydown", (event) => {
     screen = "menu";
     pressedKeys.clear();
     persistRun();
+    stopTwitchIntegration();
     renderOverlay();
   } else {
     pressedKeys.add(event.key.toLowerCase());
@@ -306,13 +350,29 @@ void boot();
 async function boot(): Promise<void> {
   const [nextSession, serverSettings] = await Promise.all([fetchSession(), fetchServerSettings()]);
   session = nextSession;
-  settings = saveSettings(normalizeSettings({ ...settings, ...serverSettings }));
+  settings = saveSettings(normalizeSettings({ ...serverSettings, ...settings }));
+  if (session.authenticated) {
+    const reward = await fetchRewardSettings();
+    if (reward?.available && reward.settings) {
+      settings = saveSettings(
+        normalizeSettings({
+          ...settings,
+          rewardCost: reward.settings.cost,
+          rewardCooldownSeconds: reward.settings.globalCooldownSeconds,
+          rewardMaxPerUserPerStream: reward.settings.maxPerUserPerStream
+        })
+      );
+    } else if (reward?.reason === "affiliate-required") {
+      session.rewardStatus = "unavailable-403";
+    }
+  }
 
   const restored = loadActiveRun();
   if (restored) {
     game = createGame(restored.mode, restored);
     screen = "game";
     message = "Aktiver Run wurde aus sessionStorage wiederhergestellt.";
+    if (game.mode === "twitch" && session.authenticated) void startTwitchIntegration(game);
   }
 
   renderOverlay();
@@ -335,6 +395,7 @@ function tick(now: number): void {
 }
 
 function startGame(mode: RunMode): void {
+  stopTwitchIntegration();
   pressedKeys.clear();
   duckNamingRequest = null;
   selectedCatch = null;
@@ -343,6 +404,7 @@ function startGame(mode: RunMode): void {
   message = "";
   persistRun();
   renderOverlay();
+  if (mode === "twitch") void startTwitchIntegration(game);
 }
 
 function createGame(mode: RunMode, saved?: SavedRun): GameState {
@@ -365,10 +427,12 @@ function createGame(mode: RunMode, saved?: SavedRun): GameState {
     sparkles: [],
     lastGuestSpawnAt: saved?.lastGuestSpawnAt ?? now,
     lastGiftAt: saved?.lastGiftAt ?? now,
-    lastDuckPollAt: 0,
-    lastDuckQuerySince: saved?.lastDuckQuerySince ?? now - 5000,
-    processedGiftIds: new Set(saved?.processedGiftIds ?? []),
+    processedTwitchEventIds: new Set(saved?.processedTwitchEventIds ?? saved?.processedGiftIds ?? []),
     pendingGiftDucks: saved?.pendingGiftDucks ?? [],
+    pendingTwitchDucks: saved?.pendingTwitchDucks ?? [],
+    raffleParticipants: saved?.raffleParticipants ?? [],
+    raffleEndsAt: saved?.raffleEndsAt ?? now + RAFFLE_INTERVAL_MS,
+    lastRaffleWinner: saved?.lastRaffleWinner,
     pendingReplacementAt: saved?.pendingReplacementAt ?? [],
     cast: {
       active: false,
@@ -419,7 +483,9 @@ function updateGame(state: GameState, dt: number, now: number): void {
   }
 
   drainGiftDuckQueue(state, Date.now());
+  drainTwitchDuckQueue(state, Date.now());
   processCatchReplacementQueue(state, Date.now());
+  if (state.mode === "twitch" && twitchConnectionStatus === "connected") processRaffle(state, Date.now());
 
   if (
     state.mode === "guest" &&
@@ -437,9 +503,9 @@ function updateGame(state: GameState, dt: number, now: number): void {
   }
 
   if (state.mode === "twitch" && session.channelConnected) {
-    void pollGiftEvents(state, now);
     if (
       state.pendingGiftDucks.length === 0 &&
+      state.pendingTwitchDucks.length === 0 &&
       state.pendingReplacementAt.length === 0 &&
       shouldSpawnIdleDuck(Date.now(), state.lastGiftAt, settings.twitchIdleDuckSeconds)
     ) {
@@ -499,21 +565,6 @@ function updateAimTarget(state: GameState, dt: number): void {
   state.cast.targetY = target.y;
 }
 
-async function pollGiftEvents(state: GameState, now: number): Promise<void> {
-  if (document.hidden) return;
-  if (now - state.lastDuckPollAt < settings.duckEventPollSeconds * 1000) return;
-  state.lastDuckPollAt = now;
-
-  const events = await fetchGiftEvents(state.lastDuckQuerySince);
-  for (const event of events) {
-    state.lastDuckQuerySince = Math.max(state.lastDuckQuerySince, event.at);
-    if (state.processedGiftIds.has(event.id)) continue;
-    state.processedGiftIds.add(event.id);
-    enqueueGiftEventDucks(state, event);
-  }
-  persistRun(state);
-}
-
 function enqueueGiftEventDucks(state: GameState, event: GiftEvent): void {
   const pendingDucks = pendingGiftDucksFromEvent(event, settings.subsPerDuck, settings.specialSubsPerDuck);
   if (pendingDucks.length === 0) return;
@@ -524,6 +575,184 @@ function enqueueGiftEventDucks(state: GameState, event: GiftEvent): void {
   drainGiftDuckQueue(state, now);
 }
 
+async function startTwitchIntegration(state: GameState): Promise<void> {
+  if (state.mode !== "twitch" || !session.authenticated || !session.user) return;
+  stopTwitchIntegration();
+
+  twitchTabLock = new TwitchTabLock(`kamiFishing.twitchLock.${session.user.id}`, () => {
+    twitchEventSubClient?.stop();
+    twitchEventSubClient = null;
+    twitchConnectionStatus = "locked";
+    message = "Twitch-Events wurden von einem anderen Tab uebernommen.";
+  });
+  if (!twitchTabLock.acquire()) {
+    twitchConnectionStatus = "locked";
+    message = "Twitch-Events laufen bereits in einem anderen Tab.";
+    return;
+  }
+
+  twitchEventSubClient = new TwitchEventSubClient({
+    registerSession: async (sessionId) => {
+      await registerTwitchEventSubSession(sessionId);
+      await syncUnfulfilledRedemptions(state);
+    },
+    onNotification: (notification) => handleTwitchNotification(state, notification),
+    onStatus: (status) => {
+      twitchConnectionStatus = status === "disconnected" ? "off" : status;
+    }
+  });
+  twitchEventSubClient.start();
+}
+
+function stopTwitchIntegration(): void {
+  twitchEventSubClient?.stop();
+  twitchEventSubClient = null;
+  twitchTabLock?.release();
+  twitchTabLock = null;
+  twitchConnectionStatus = "off";
+}
+
+function handleTwitchNotification(state: GameState, notification: TwitchEventSubNotification): void {
+  if (game !== state || screen !== "game" || state.mode !== "twitch") return;
+  const messageId = notification.metadata.message_id;
+  if (state.processedTwitchEventIds.has(messageId)) return;
+  state.processedTwitchEventIds.add(messageId);
+  const event = notification.payload.event;
+  if (!event) return;
+
+  if (notification.metadata.subscription_type === "channel.subscription.gift") {
+    const anonymous = Boolean(event.is_anonymous);
+    enqueueGiftEventDucks(state, {
+      id: messageId,
+      at: Date.now(),
+      displayName: anonymous ? "Anonymous" : String(event.user_name || event.user_login || "Anonymous"),
+      total: Math.max(1, Number(event.total || 1)),
+      anonymous,
+      twitchUserId: anonymous ? undefined : String(event.user_id || "") || undefined
+    });
+  }
+
+  if (notification.metadata.subscription_type === "channel.chat.message") {
+    const text = String((event.message as { text?: unknown } | undefined)?.text || "");
+    if (isDuckCommand(text)) {
+      state.raffleParticipants = addUniqueParticipant(state.raffleParticipants, {
+        twitchUserId: String(event.chatter_user_id || ""),
+        displayName: String(event.chatter_user_name || event.chatter_user_login || "Twitch User")
+      }).filter((participant) => participant.twitchUserId);
+    }
+  }
+
+  if (notification.metadata.subscription_type === "channel.channel_points_custom_reward_redemption.add") {
+    const redemptionId = String(event.id || "");
+    void acceptRewardRedemption(state, {
+      id: redemptionId,
+      userId: String(event.user_id || ""),
+      userName: String(event.user_name || event.user_login || "Twitch User"),
+      redeemedAt: String(event.redeemed_at || "")
+    });
+  }
+
+  pruneProcessedTwitchEvents(state);
+  persistRun(state);
+}
+
+async function syncUnfulfilledRedemptions(state: GameState): Promise<void> {
+  const redemptions = await fetchUnfulfilledRedemptions();
+  for (const redemption of redemptions) {
+    await acceptRewardRedemption(state, redemption);
+  }
+}
+
+async function acceptRewardRedemption(
+  state: GameState,
+  redemption: { id: string; userId: string; userName: string; redeemedAt: string }
+): Promise<void> {
+  if (!redemption.id || !redemption.userId) return;
+  const key = `redemption:${redemption.id}`;
+  if (!state.processedTwitchEventIds.has(key)) {
+    state.processedTwitchEventIds.add(key);
+    state.pendingTwitchDucks.push({
+      id: key,
+      name: redemption.userName.slice(0, 18),
+      twitchUserId: redemption.userId,
+      source: "reward",
+      redemptionId: redemption.id
+    });
+    state.lastGiftAt = Date.now();
+    drainTwitchDuckQueue(state, Date.now());
+    persistRun(state);
+  }
+
+  try {
+    await fulfillRedemptions([redemption.id]);
+  } catch (error) {
+    console.warn("Could not fulfill Twitch redemption yet", error);
+  }
+}
+
+function processRaffle(state: GameState, now: number): void {
+  if (now < state.raffleEndsAt) return;
+  const winner = drawRaffleWinner(
+    state.raffleParticipants,
+    blockedTwitchUserIds(state.ducks, state.pendingTwitchDucks)
+  );
+  state.raffleParticipants = [];
+  state.raffleEndsAt = now + RAFFLE_INTERVAL_MS;
+
+  if (!winner) {
+    state.lastRaffleWinner = undefined;
+    state.eventBanners.push({
+      id: crypto.randomUUID(),
+      text: "Keine zulaessige !Ente-Auslosung in dieser Runde.",
+      variant: "normal",
+      enqueuedAt: now
+    });
+    return;
+  }
+
+  state.lastRaffleWinner = winner.displayName;
+  state.pendingTwitchDucks.push({
+    id: `raffle:${crypto.randomUUID()}`,
+    name: winner.displayName.slice(0, 18),
+    twitchUserId: winner.twitchUserId,
+    source: "chat"
+  });
+  state.lastGiftAt = now;
+  state.eventBanners.push({
+    id: crypto.randomUUID(),
+    text: `${winner.displayName} gewinnt die !Ente-Auslosung!`,
+    variant: "normal",
+    enqueuedAt: now
+  });
+  drainTwitchDuckQueue(state, now);
+}
+
+function drainTwitchDuckQueue(state: GameState, now: number): void {
+  while (state.pendingTwitchDucks.length > 0 && canSpawnDuck(state.ducks.length)) {
+    const pending = state.pendingTwitchDucks.shift();
+    if (!pending) break;
+    const duck = createDuck(pending.source, {
+      name: pending.name,
+      twitchUserId: pending.twitchUserId,
+      variant: "normal",
+      catchableDelayMs: NEW_DUCK_CATCHABLE_DELAY_MS,
+      now
+    });
+    if (!addDuckIfCapacity(state, duck)) {
+      state.pendingTwitchDucks.unshift(pending);
+      break;
+    }
+  }
+}
+
+function pruneProcessedTwitchEvents(state: GameState): void {
+  while (state.processedTwitchEventIds.size > 500) {
+    const first = state.processedTwitchEventIds.values().next().value as string | undefined;
+    if (!first) break;
+    state.processedTwitchEventIds.delete(first);
+  }
+}
+
 function drainGiftDuckQueue(state: GameState, now: number): void {
   while (state.pendingGiftDucks.length > 0 && canSpawnDuck(state.ducks.length)) {
     const pending = state.pendingGiftDucks.shift();
@@ -531,6 +760,7 @@ function drainGiftDuckQueue(state: GameState, now: number): void {
 
     const duck = createDuck("gift", {
       name: pending.name,
+      twitchUserId: pending.twitchUserId,
       variant: pending.variant,
       catchableDelayMs: NEW_DUCK_CATCHABLE_DELAY_MS,
       now
@@ -621,9 +851,10 @@ function updateCast(state: GameState, dt: number): void {
         duckNamingRequest = null;
         renderOverlay();
       }
-      const countBeforeGiftQueue = state.ducks.length;
+      const countBeforeQueues = state.ducks.length;
       drainGiftDuckQueue(state, now);
-      if (state.ducks.length === countBeforeGiftQueue) {
+      drainTwitchDuckQueue(state, now);
+      if (state.ducks.length === countBeforeQueues) {
         state.pendingReplacementAt.push(now + CATCH_REPLACEMENT_DELAY_MS);
       }
     }
@@ -727,6 +958,7 @@ function catchHistoryEntryAtPoint(state: GameState, point: { x: number; y: numbe
 
 function finishGame(): void {
   if (!game) return;
+  stopTwitchIntegration();
   duckNamingRequest = null;
   selectedCatch = null;
   game.ended = true;
@@ -763,9 +995,12 @@ function persistRun(state = game): void {
     catchCooldownUntil: state.catchCooldownUntil,
     lastGuestSpawnAt: state.lastGuestSpawnAt,
     lastGiftAt: state.lastGiftAt,
-    lastDuckQuerySince: state.lastDuckQuerySince,
-    processedGiftIds: [...state.processedGiftIds],
+    processedTwitchEventIds: [...state.processedTwitchEventIds],
     pendingGiftDucks: state.pendingGiftDucks,
+    pendingTwitchDucks: state.pendingTwitchDucks,
+    raffleParticipants: state.raffleParticipants,
+    raffleEndsAt: state.raffleEndsAt,
+    lastRaffleWinner: state.lastRaffleWinner,
     pendingReplacementAt: state.pendingReplacementAt
   });
 }
@@ -781,6 +1016,7 @@ function normalizeSavedDuck(duck: Duck): Duck {
 
 type CreateDuckOptions = {
   name?: string;
+  twitchUserId?: string;
   variant?: DuckVariant;
   catchableDelayMs?: number;
   now?: number;
@@ -802,6 +1038,7 @@ function createDuck(source: Duck["source"], options: CreateDuckOptions = {}): Du
     bob: Math.random() * Math.PI * 2,
     movementPhase: Math.random() * Math.PI * 2,
     name: options.name,
+    twitchUserId: options.twitchUserId,
     spriteIndex: Math.floor(Math.random() * spritePool.length),
     variant,
     catchableAt: now + (options.catchableDelayMs ?? 0),
@@ -1105,6 +1342,10 @@ function drawSelectedCatch(): void {
   const sourceLabel =
     selectedCatch.source === "gift"
       ? "Gift-Sub-Ente"
+      : selectedCatch.source === "reward"
+        ? "Kanalpunkte-Ente"
+        : selectedCatch.source === "chat"
+          ? "!Ente-Auslosung"
       : selectedCatch.source === "idle"
         ? "Twitch Auto-Ente"
         : selectedCatch.source === "guest"
@@ -1289,7 +1530,7 @@ function isDuckBackgroundPixel(data: Uint8ClampedArray, index: number): boolean 
 
 function drawHud(): void {
   ctx.textAlign = "left";
-  panel(24, 24, 390, 225);
+  panel(24, 24, 390, game?.mode === "twitch" ? 310 : 225);
   ctx.font = "42px Consolas, monospace";
   ctx.fillStyle = "#ffd35e";
   ctx.fillText("DUCK RESCUE", 105, 72);
@@ -1298,10 +1539,18 @@ function drawHud(): void {
   ctx.fillText("Catch all the ducks!", 55, 116);
   const caught = game?.caughtCount ?? 0;
   const active = game?.ducks.length ?? 0;
-  const queued = game?.pendingGiftDucks.length ?? 0;
+  const queued = (game?.pendingGiftDucks.length ?? 0) + (game?.pendingTwitchDucks.length ?? 0);
   ctx.fillText(`Caught: ${caught}`, 55, 150);
   ctx.fillText(`Pond: ${active} / ${MAX_ACTIVE_DUCKS}${queued > 0 ? ` (+${queued})` : ""}`, 55, 182);
   ctx.fillText(`Score: ${game?.score ?? 0}`, 55, 214);
+  if (game?.mode === "twitch") {
+    ctx.font = "20px Consolas, monospace";
+    ctx.fillStyle = twitchConnectionStatus === "connected" ? "#a7e9c8" : "#ffd35e";
+    const raffleSeconds = Math.max(0, Math.ceil((game.raffleEndsAt - Date.now()) / 1000));
+    ctx.fillText(`!Ente: ${game.raffleParticipants.length} dabei`, 55, 250);
+    ctx.fillText(`Ziehung in: ${raffleSeconds}s`, 55, 278);
+    ctx.fillText(`Twitch: ${twitchConnectionLabel()}`, 55, 306);
+  }
 
   panel(24, 890, 320, 165);
   ctx.font = "30px Consolas, monospace";
@@ -1377,6 +1626,14 @@ function drawHud(): void {
     ctx.strokeStyle = "#ffffff";
     ctx.strokeRect(meterX, meterY, meterWidth, meterHeight);
   }
+}
+
+function twitchConnectionLabel(): string {
+  if (twitchConnectionStatus === "connected") return "verbunden";
+  if (twitchConnectionStatus === "connecting") return "verbindet";
+  if (twitchConnectionStatus === "locked") return "anderer Tab";
+  if (twitchConnectionStatus === "error") return "Fehler";
+  return "aus";
 }
 
 function panel(x: number, y: number, width: number, height: number): void {
@@ -1481,8 +1738,8 @@ function renderMenu(node: HTMLElement): void {
     `;
   node.innerHTML = `
     <h1>Kami Fishing</h1>
-    <p>Angel Gummienten aus dem Teich. Guest-Runs laufen komplett lokal, Twitch-Runs koennen Gift-Sub-Enten empfangen und speichern Highscores nur in diesem Browser.</p>
-    <p class="status">${userText}${session.channelConnected ? " - Gift-Subs verbunden" : ""}</p>
+    <p>Angel Gummienten aus dem Teich. Twitch-Runs empfangen Gift-Subs, Kanalpunkte und die 60-Sekunden-Auslosung fuer <strong>!Ente</strong> direkt im geoeffneten Browser.</p>
+    <p class="status">${userText}${session.channelConnected ? " - Twitch bereit" : ""}${session.rewardStatus?.startsWith("unavailable") ? " - Kanalpunkte nicht verfuegbar" : ""}</p>
     ${message ? `<p class="hint">${message}</p>` : ""}
     <div class="button-row">
       ${hasActiveRun ? '<button data-action="resume">Resume Run</button><button data-action="end-run">End Run</button>' : ""}
@@ -1540,7 +1797,7 @@ function renderSettings(node: HTMLElement): void {
     <h2>Settings</h2>
     <p class="hint">${
       showTwitchSettings
-        ? "Diese Werte bleiben lokal in deinem Browser und bestimmen, wie Gift-Subs in Enten umgerechnet werden."
+        ? "Diese Werte bleiben lokal in deinem Browser. Die Kanalpunkte-Werte werden beim Speichern mit der automatisch erstellten Twitch-Belohnung synchronisiert."
         : "Dieser Wert bleibt lokal in deinem Browser und bestimmt, wie oft eine neue Guest-Ente erscheint."
     }</p>
     <div class="settings-grid">
@@ -1555,6 +1812,21 @@ function renderSettings(node: HTMLElement): void {
               <span>Subs fuer Special-Ente</span>
               <small>So viele Gift-Subs erzeugen eine schnelle Special-Ente. Standard: 10.</small>
               <input data-setting="specialSubsPerDuck" type="number" min="1" max="1000" value="${settings.specialSubsPerDuck}">
+            </label>
+            <label class="${session.rewardStatus?.startsWith("unavailable") ? "setting-disabled" : ""}">
+              <span>Kanalpunkte pro Ente</span>
+              <small>Preis der automatisch verwalteten Twitch-Belohnung.</small>
+              <input data-setting="rewardCost" type="number" min="1" max="1000000" value="${settings.rewardCost}" ${session.rewardStatus?.startsWith("unavailable") ? "disabled" : ""}>
+            </label>
+            <label class="${session.rewardStatus?.startsWith("unavailable") ? "setting-disabled" : ""}">
+              <span>Belohnungs-Cooldown (Sek.)</span>
+              <small>0 deaktiviert den globalen Cooldown.</small>
+              <input data-setting="rewardCooldownSeconds" type="number" min="0" max="86400" value="${settings.rewardCooldownSeconds}" ${session.rewardStatus?.startsWith("unavailable") ? "disabled" : ""}>
+            </label>
+            <label class="${session.rewardStatus?.startsWith("unavailable") ? "setting-disabled" : ""}">
+              <span>Max. pro Zuschauer und Stream</span>
+              <small>${session.rewardStatus?.startsWith("unavailable") ? "Kanalpunkte benötigen Twitch Affiliate oder Partner." : "0 deaktiviert das Nutzerlimit."}</small>
+              <input data-setting="rewardMaxPerUserPerStream" type="number" min="0" max="100" value="${settings.rewardMaxPerUserPerStream}" ${session.rewardStatus?.startsWith("unavailable") ? "disabled" : ""}>
             </label>`
           : ""
       }
@@ -1597,6 +1869,7 @@ function bindButtons(node: HTMLElement): void {
       if (action === "twitch") startGame("twitch");
       if (action === "resume") {
         screen = "game";
+        if (game?.mode === "twitch") void startTwitchIntegration(game);
         renderOverlay();
       }
       if (action === "end-run") finishGame();
@@ -1613,23 +1886,47 @@ function bindButtons(node: HTMLElement): void {
       }
       if (action === "menu") {
         screen = "menu";
+        stopTwitchIntegration();
         renderOverlay();
       }
       if (action === "logout") {
+        stopTwitchIntegration();
         await logout();
         session = await fetchSession();
         message = "Logout abgeschlossen.";
         renderOverlay();
       }
       if (action === "save-settings") {
+        const savingTwitchSettings = (game?.mode ?? (session.authenticated ? "twitch" : "guest")) === "twitch";
         const next = { ...settings };
         node.querySelectorAll<HTMLInputElement>("input[data-setting]").forEach((input) => {
           const key = input.dataset.setting as keyof GameSettings;
           next[key] = Number(input.value);
         });
         settings = saveSettings(next);
-        message = "Settings gespeichert.";
+        if (savingTwitchSettings && session.authenticated && !session.rewardStatus?.startsWith("unavailable")) {
+          try {
+            const remote = await updateRewardSettings({
+              cost: settings.rewardCost,
+              globalCooldownSeconds: settings.rewardCooldownSeconds,
+              maxPerUserPerStream: settings.rewardMaxPerUserPerStream
+            });
+            settings = saveSettings({
+              ...settings,
+              rewardCost: remote.cost,
+              rewardCooldownSeconds: remote.globalCooldownSeconds,
+              rewardMaxPerUserPerStream: remote.maxPerUserPerStream
+            });
+            message = "Settings und Twitch-Belohnung gespeichert.";
+          } catch (error) {
+            console.warn(error);
+            message = "Lokale Settings gespeichert; Twitch-Belohnung konnte nicht aktualisiert werden.";
+          }
+        } else {
+          message = "Settings gespeichert.";
+        }
         screen = "menu";
+        stopTwitchIntegration();
         renderOverlay();
       }
     });
