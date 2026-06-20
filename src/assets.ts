@@ -7,7 +7,12 @@ export const ASSETS = {
     "/assets/ducks/duck-2.webp",
     "/assets/ducks/duck-3.webp",
     "/assets/ducks/duck-4.webp",
-    "/assets/ducks/duck-5.webp"
+    "/assets/ducks/duck-5.webp",
+    "/assets/ducks/duck-6.webp",
+    "/assets/ducks/duck-7.webp",
+    "/assets/ducks/duck-8.webp",
+    "/assets/ducks/duck-9.webp",
+    "/assets/ducks/duck-10.webp"
   ],
   specialDucks: [
     "/assets/special-ducks/special-duck-1.webp",

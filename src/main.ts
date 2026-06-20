@@ -149,6 +149,7 @@ let settings: GameSettings = loadSettings();
 let screen: Screen = "menu";
 let game: GameState | null = null;
 let duckNamingRequest: DuckNamingRequest | null = null;
+let selectedCatch: CatchRecord | null = null;
 let lastFrame = performance.now();
 let message = "";
 const pressedKeys = new Set<string>();
@@ -224,7 +225,7 @@ window.addEventListener("message", async (event: MessageEvent) => {
 });
 
 canvas.addEventListener("mousemove", (event) => {
-  if (!game || screen !== "game" || game.cast.active || duckNamingRequest) return;
+  if (!game || screen !== "game" || game.cast.active || duckNamingRequest || selectedCatch) return;
   const point = pointerToCanvasPoint(event);
   const target = clampToWater(point);
   game.cast.aimGoalX = target.x;
@@ -232,9 +233,23 @@ canvas.addEventListener("mousemove", (event) => {
 });
 
 canvas.addEventListener("pointerdown", (event) => {
-  if (!game || screen !== "game" || game.cast.active || duckNamingRequest) return;
+  if (!game || screen !== "game" || duckNamingRequest) return;
   event.preventDefault();
   const point = pointerToCanvasPoint(event);
+
+  if (selectedCatch) {
+    selectedCatch = null;
+    return;
+  }
+
+  const historyEntry = catchHistoryEntryAtPoint(game, point);
+  if (historyEntry) {
+    selectedCatch = historyEntry;
+    pressedKeys.clear();
+    return;
+  }
+
+  if (game.cast.active) return;
   const target = clampToWater(point);
   game.cast.aimGoalX = target.x;
   game.cast.aimGoalY = target.y;
@@ -243,6 +258,13 @@ canvas.addEventListener("pointerdown", (event) => {
 
 window.addEventListener("keydown", (event) => {
   if (event.target instanceof HTMLInputElement) return;
+
+  if (selectedCatch && screen === "game") {
+    event.preventDefault();
+    selectedCatch = null;
+    pressedKeys.clear();
+    return;
+  }
 
   if (duckNamingRequest && screen === "game") {
     event.preventDefault();
@@ -315,6 +337,7 @@ function tick(now: number): void {
 function startGame(mode: RunMode): void {
   pressedKeys.clear();
   duckNamingRequest = null;
+  selectedCatch = null;
   game = createGame(mode);
   screen = "game";
   message = "";
@@ -378,8 +401,8 @@ function createGame(mode: RunMode, saved?: SavedRun): GameState {
 }
 
 function updateGame(state: GameState, dt: number, now: number): void {
-  const namingLocked = duckNamingRequest !== null;
-  if (!namingLocked) {
+  const interactionLocked = duckNamingRequest !== null || selectedCatch !== null;
+  if (!interactionLocked) {
     state.skillPhase = (state.skillPhase + dt * SKILL_CHECK_SPEED) % 1;
     if (!state.cast.active) {
       state.cast.power = (Math.sin(state.skillPhase * Math.PI * 2 - Math.PI / 2) + 1) / 2;
@@ -431,7 +454,7 @@ function updateGame(state: GameState, dt: number, now: number): void {
     }
   }
 
-  if (!namingLocked) updateCast(state, dt);
+  if (!interactionLocked) updateCast(state, dt);
   updateEventBanners(state, now);
   state.sparkles = state.sparkles.filter((sparkle) => sparkle.until > Date.now());
   persistRunThrottled(state);
@@ -691,9 +714,21 @@ function pointerToCanvasPoint(event: MouseEvent): { x: number; y: number } {
   };
 }
 
+function catchHistoryEntryAtPoint(state: GameState, point: { x: number; y: number }): CatchRecord | null {
+  if (point.x < 1595 || point.x > 1865) return null;
+
+  const entries = state.catchHistory.slice(0, 5);
+  for (let index = 0; index < entries.length; index += 1) {
+    const rowTop = 714 + index * 56;
+    if (point.y >= rowTop && point.y <= rowTop + 52) return entries[index];
+  }
+  return null;
+}
+
 function finishGame(): void {
   if (!game) return;
   duckNamingRequest = null;
+  selectedCatch = null;
   game.ended = true;
   if (session.authenticated) {
     addHighscore(session, {
@@ -802,6 +837,7 @@ function draw(): void {
     drawCatchHistory(game);
     drawEventBanner(game);
     drawFeaturedCatch(game);
+    drawSelectedCatch();
   }
 }
 
@@ -933,7 +969,7 @@ function drawGameObjects(state: GameState): void {
 
   drawSparkles(state);
 
-  if (!state.cast.active && !duckNamingRequest) {
+  if (!state.cast.active && !duckNamingRequest && !selectedCatch) {
     drawAimReticle(state);
   }
 
@@ -1059,6 +1095,46 @@ function drawFeaturedCatch(state: GameState): void {
   ctx.fillStyle = "#fff4c8";
   ctx.font = "28px Consolas, monospace";
   ctx.fillText(state.featuredCatch.record.name.slice(0, 20), 960, 395);
+  ctx.restore();
+}
+
+function drawSelectedCatch(): void {
+  if (!selectedCatch) return;
+
+  const isSpecial = selectedCatch.variant === "special";
+  const sourceLabel =
+    selectedCatch.source === "gift"
+      ? "Gift-Sub-Ente"
+      : selectedCatch.source === "idle"
+        ? "Twitch Auto-Ente"
+        : selectedCatch.source === "guest"
+          ? "Guest-Ente"
+          : "Start-Ente";
+
+  ctx.save();
+  ctx.fillStyle = "rgba(8, 5, 3, 0.72)";
+  ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  panel(610, 180, 700, 650);
+  if (isSpecial) {
+    ctx.strokeStyle = "#ffd35e";
+    ctx.lineWidth = 8;
+    ctx.strokeRect(620, 190, 680, 630);
+  }
+
+  ctx.fillStyle = isSpecial ? "#fff08a" : "#ffd35e";
+  ctx.font = "38px Consolas, monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(isSpecial ? "SPECIAL DUCK" : "CAUGHT DUCK", 960, 245);
+  drawDuckSprite(selectedCatch.spriteIndex, selectedCatch.variant, 960, 585, 330);
+
+  ctx.fillStyle = "#fff4c8";
+  ctx.font = "34px Consolas, monospace";
+  ctx.fillText(selectedCatch.name.slice(0, 24), 960, 660);
+  ctx.fillStyle = "#d7bd84";
+  ctx.font = "24px Consolas, monospace";
+  ctx.fillText(sourceLabel, 960, 705);
+  ctx.font = "20px Consolas, monospace";
+  ctx.fillText("Klicken oder ESC zum Schliessen", 960, 775);
   ctx.restore();
 }
 
@@ -1246,7 +1322,7 @@ function drawHud(): void {
     ctx.fillStyle = "#1d0d07";
     ctx.fillRect(meterX - 5, meterY - 1, meterWidth + 10, meterHeight + 2);
 
-    if (duckNamingRequest) {
+    if (duckNamingRequest || selectedCatch) {
       ctx.fillStyle = "rgba(37, 19, 10, 0.96)";
       ctx.fillRect(meterX, meterY - 8, meterWidth, 36);
       ctx.strokeStyle = "#ffd35e";
@@ -1255,7 +1331,7 @@ function drawHud(): void {
       ctx.fillStyle = "#ffd35e";
       ctx.font = "25px Consolas, monospace";
       ctx.textAlign = "center";
-      ctx.fillText("ENTE BENENNEN", meterX + meterWidth / 2, meterY + 19);
+      ctx.fillText(duckNamingRequest ? "ENTE BENENNEN" : "HISTORY VIEW", meterX + meterWidth / 2, meterY + 19);
       ctx.textAlign = "left";
       return;
     }
@@ -1330,7 +1406,10 @@ function renderOverlay(): void {
     renderDuckNamingPrompt();
     return;
   }
-  if ((screen === "highscores" || screen === "settings") && !session.authenticated) {
+  if (screen === "highscores" && !session.authenticated) {
+    screen = "menu";
+  }
+  if (screen === "settings" && !canOpenSettings()) {
     screen = "menu";
   }
 
@@ -1391,14 +1470,13 @@ function renderMenu(node: HTMLElement): void {
     ? `
       <button data-action="twitch">Play Twitch Run</button>
       <button data-action="scores">Local Highscores</button>
-      <button data-action="settings">Settings</button>
       <button data-action="logout">Logout</button>
     `
     : "";
   const disconnectedActions = session.authenticated
     ? ""
     : `
-      <button data-action="guest">Play as Guest</button>
+      ${hasActiveRun ? "" : '<button data-action="guest">Play as Guest</button>'}
       <button data-action="login">Twitch Login</button>
     `;
   node.innerHTML = `
@@ -1409,6 +1487,7 @@ function renderMenu(node: HTMLElement): void {
     <div class="button-row">
       ${hasActiveRun ? '<button data-action="resume">Resume Run</button><button data-action="end-run">End Run</button>' : ""}
       ${disconnectedActions}
+      ${canOpenSettings() ? '<button data-action="settings">Settings</button>' : ""}
       ${authenticatedActions}
     </div>
   `;
@@ -1459,18 +1538,26 @@ function renderSettings(node: HTMLElement): void {
   const showTwitchSettings = settingsMode === "twitch";
   node.innerHTML = `
     <h2>Settings</h2>
-    <p class="hint">Diese Werte bleiben lokal in deinem Browser. Gift-Sub-Events werden roh geholt und hier in Enten umgerechnet.</p>
+    <p class="hint">${
+      showTwitchSettings
+        ? "Diese Werte bleiben lokal in deinem Browser und bestimmen, wie Gift-Subs in Enten umgerechnet werden."
+        : "Dieser Wert bleibt lokal in deinem Browser und bestimmt, wie oft eine neue Guest-Ente erscheint."
+    }</p>
     <div class="settings-grid">
-      <label>
-        <span>Subs pro Ente</span>
-        <small>So viele Gift-Subs erzeugen eine normale Ente, nachdem Special-Enten abgezogen wurden.</small>
-        <input data-setting="subsPerDuck" type="number" min="1" max="100" value="${settings.subsPerDuck}">
-      </label>
-      <label>
-        <span>Subs fuer Special-Ente</span>
-        <small>So viele Gift-Subs erzeugen eine schnelle Special-Ente. Standard: 10.</small>
-        <input data-setting="specialSubsPerDuck" type="number" min="1" max="1000" value="${settings.specialSubsPerDuck}">
-      </label>
+      ${
+        showTwitchSettings
+          ? `<label>
+              <span>Subs pro Ente</span>
+              <small>So viele Gift-Subs erzeugen eine normale Ente, nachdem Special-Enten abgezogen wurden.</small>
+              <input data-setting="subsPerDuck" type="number" min="1" max="100" value="${settings.subsPerDuck}">
+            </label>
+            <label>
+              <span>Subs fuer Special-Ente</span>
+              <small>So viele Gift-Subs erzeugen eine schnelle Special-Ente. Standard: 10.</small>
+              <input data-setting="specialSubsPerDuck" type="number" min="1" max="1000" value="${settings.specialSubsPerDuck}">
+            </label>`
+          : ""
+      }
       ${
         showGuestSettings
           ? `<label>
@@ -1498,6 +1585,10 @@ function renderSettings(node: HTMLElement): void {
   bindButtons(node);
 }
 
+function canOpenSettings(): boolean {
+  return session.authenticated || game?.mode === "guest";
+}
+
 function bindButtons(node: HTMLElement): void {
   node.querySelectorAll("button[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -1516,7 +1607,7 @@ function bindButtons(node: HTMLElement): void {
         renderOverlay();
       }
       if (action === "settings") {
-        if (!session.authenticated) return;
+        if (!canOpenSettings()) return;
         screen = "settings";
         renderOverlay();
       }
