@@ -1278,6 +1278,12 @@ function renderMenu(node: HTMLElement): void {
       <button data-action="logout">Logout</button>
     `
     : "";
+  const disconnectedActions = session.channelConnected
+    ? ""
+    : `
+      <button data-action="guest">Play as Guest</button>
+      <button data-action="login">${session.authenticated ? "Twitch neu verbinden" : "Twitch Login"}</button>
+    `;
   node.innerHTML = `
     <h1>Kami Fishing</h1>
     <p>Angel Gummienten aus dem Teich. Guest-Runs laufen komplett lokal, Twitch-Runs koennen Gift-Sub-Enten empfangen und speichern Highscores nur in diesem Browser.</p>
@@ -1285,8 +1291,7 @@ function renderMenu(node: HTMLElement): void {
     ${message ? `<p class="hint">${message}</p>` : ""}
     <div class="button-row">
       ${hasActiveRun ? '<button data-action="resume">Resume Run</button><button data-action="end-run">End Run</button>' : ""}
-      <button data-action="guest">Play as Guest</button>
-      <button data-action="login">${session.authenticated ? "Twitch neu verbinden" : "Twitch Login"}</button>
+      ${disconnectedActions}
       ${authenticatedActions}
     </div>
   `;
