@@ -79,6 +79,7 @@ export type SavedRun = {
   lastDuckQuerySince: number;
   processedGiftIds: string[];
   pendingGiftDucks: PendingGiftDuck[];
+  pendingReplacementAt?: number[];
 };
 
 export type HighscoreEntry = {

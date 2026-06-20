@@ -111,6 +111,21 @@ canvas {
   line-height: 1.45;
 }
 
+.duck-name-panel {
+  align-self: start;
+  width: min(520px, calc(100vw - 32px));
+  margin-top: 18px;
+}
+
+.duck-name-form {
+  display: grid;
+  gap: 12px;
+}
+
+.duck-name-form .button-row {
+  margin-top: 2px;
+}
+
 .button-row {
   display: flex;
   flex-wrap: wrap;

@@ -5,6 +5,7 @@ import { moveAimTarget, moveAimTowardGoal } from "./game/aim";
 import { duckSizeForDepth, sortDucksBackToFront } from "./game/depth";
 import {
   CATCH_COOLDOWN_MS,
+  CATCH_REPLACEMENT_DELAY_MS,
   GUEST_SPECIAL_CHANCE,
   MAX_ACTIVE_DUCKS,
   NEW_DUCK_CATCHABLE_DELAY_MS,
@@ -97,6 +98,7 @@ type GameState = {
   lastDuckQuerySince: number;
   processedGiftIds: Set<string>;
   pendingGiftDucks: PendingGiftDuck[];
+  pendingReplacementAt: number[];
   cast: CastState;
   ended: boolean;
 };
@@ -121,6 +123,11 @@ type SparkleEffect = {
   until: number;
 };
 
+type DuckNamingRequest = {
+  duckId: string;
+  showAfter: number;
+};
+
 type DuckSprite = {
   source: string;
   image: HTMLImageElement;
@@ -141,6 +148,7 @@ let session: UserSession = { authenticated: false, channelConnected: false };
 let settings: GameSettings = loadSettings();
 let screen: Screen = "menu";
 let game: GameState | null = null;
+let duckNamingRequest: DuckNamingRequest | null = null;
 let lastFrame = performance.now();
 let message = "";
 const pressedKeys = new Set<string>();
@@ -216,7 +224,7 @@ window.addEventListener("message", async (event: MessageEvent) => {
 });
 
 canvas.addEventListener("mousemove", (event) => {
-  if (!game || screen !== "game" || game.cast.active) return;
+  if (!game || screen !== "game" || game.cast.active || duckNamingRequest) return;
   const point = pointerToCanvasPoint(event);
   const target = clampToWater(point);
   game.cast.aimGoalX = target.x;
@@ -224,7 +232,7 @@ canvas.addEventListener("mousemove", (event) => {
 });
 
 canvas.addEventListener("pointerdown", (event) => {
-  if (!game || screen !== "game" || game.cast.active) return;
+  if (!game || screen !== "game" || game.cast.active || duckNamingRequest) return;
   event.preventDefault();
   const point = pointerToCanvasPoint(event);
   const target = clampToWater(point);
@@ -234,6 +242,14 @@ canvas.addEventListener("pointerdown", (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if (event.target instanceof HTMLInputElement) return;
+
+  if (duckNamingRequest && screen === "game") {
+    event.preventDefault();
+    pressedKeys.clear();
+    return;
+  }
+
   if (!game || screen !== "game") {
     if (event.key === "Escape" && screen !== "menu") {
       screen = "menu";
@@ -287,6 +303,9 @@ function tick(now: number): void {
 
   if (game && screen === "game") {
     updateGame(game, dt, now);
+    if (duckNamingRequest && Date.now() >= duckNamingRequest.showAfter && overlayNode.childElementCount === 0) {
+      renderOverlay();
+    }
   }
 
   draw();
@@ -295,6 +314,7 @@ function tick(now: number): void {
 
 function startGame(mode: RunMode): void {
   pressedKeys.clear();
+  duckNamingRequest = null;
   game = createGame(mode);
   screen = "game";
   message = "";
@@ -326,6 +346,7 @@ function createGame(mode: RunMode, saved?: SavedRun): GameState {
     lastDuckQuerySince: saved?.lastDuckQuerySince ?? now - 5000,
     processedGiftIds: new Set(saved?.processedGiftIds ?? []),
     pendingGiftDucks: saved?.pendingGiftDucks ?? [],
+    pendingReplacementAt: saved?.pendingReplacementAt ?? [],
     cast: {
       active: false,
       power: 0,
@@ -357,12 +378,15 @@ function createGame(mode: RunMode, saved?: SavedRun): GameState {
 }
 
 function updateGame(state: GameState, dt: number, now: number): void {
-  state.skillPhase = (state.skillPhase + dt * SKILL_CHECK_SPEED) % 1;
-  if (!state.cast.active) {
-    state.cast.power = (Math.sin(state.skillPhase * Math.PI * 2 - Math.PI / 2) + 1) / 2;
-  }
+  const namingLocked = duckNamingRequest !== null;
+  if (!namingLocked) {
+    state.skillPhase = (state.skillPhase + dt * SKILL_CHECK_SPEED) % 1;
+    if (!state.cast.active) {
+      state.cast.power = (Math.sin(state.skillPhase * Math.PI * 2 - Math.PI / 2) + 1) / 2;
+    }
 
-  updateAimTarget(state, dt);
+    updateAimTarget(state, dt);
+  }
 
   for (const duck of state.ducks) {
     if (duck.caught) continue;
@@ -372,8 +396,13 @@ function updateGame(state: GameState, dt: number, now: number): void {
   }
 
   drainGiftDuckQueue(state, Date.now());
+  processCatchReplacementQueue(state, Date.now());
 
-  if (state.mode === "guest" && Date.now() - state.lastGuestSpawnAt > settings.guestDuckIntervalSeconds * 1000) {
+  if (
+    state.mode === "guest" &&
+    state.pendingReplacementAt.length === 0 &&
+    Date.now() - state.lastGuestSpawnAt > settings.guestDuckIntervalSeconds * 1000
+  ) {
     addDuckIfCapacity(
       state,
       createDuck("guest", {
@@ -386,23 +415,23 @@ function updateGame(state: GameState, dt: number, now: number): void {
 
   if (state.mode === "twitch" && session.channelConnected) {
     void pollGiftEvents(state, now);
-    if (state.pendingGiftDucks.length === 0 && shouldSpawnIdleDuck(Date.now(), state.lastGiftAt, settings.twitchIdleDuckSeconds)) {
+    if (
+      state.pendingGiftDucks.length === 0 &&
+      state.pendingReplacementAt.length === 0 &&
+      shouldSpawnIdleDuck(Date.now(), state.lastGiftAt, settings.twitchIdleDuckSeconds)
+    ) {
       if (canSpawnDuck(state.ducks.length)) {
-        const name = window.prompt("Keine Subs in letzter Zeit. Wie soll die neue Ente heissen?")?.trim();
-        addDuckIfCapacity(
-          state,
-          createDuck("idle", {
-            name: name || undefined,
-            variant: chooseDuckVariant(TWITCH_IDLE_SPECIAL_CHANCE),
-            catchableDelayMs: NEW_DUCK_CATCHABLE_DELAY_MS
-          })
-        );
+        const duck = createDuck("idle", {
+          variant: chooseDuckVariant(TWITCH_IDLE_SPECIAL_CHANCE),
+          catchableDelayMs: NEW_DUCK_CATCHABLE_DELAY_MS
+        });
+        if (addDuckIfCapacity(state, duck)) requestDuckName(duck);
       }
       state.lastGiftAt = Date.now();
     }
   }
 
-  updateCast(state, dt);
+  if (!namingLocked) updateCast(state, dt);
   updateEventBanners(state, now);
   state.sparkles = state.sparkles.filter((sparkle) => sparkle.until > Date.now());
   persistRunThrottled(state);
@@ -565,10 +594,14 @@ function updateCast(state: GameState, dt: number): void {
     }
     if (caughtDuckId) {
       state.ducks = state.ducks.filter((duck) => duck.id !== caughtDuckId);
+      if (duckNamingRequest?.duckId === caughtDuckId) {
+        duckNamingRequest = null;
+        renderOverlay();
+      }
       const countBeforeGiftQueue = state.ducks.length;
       drainGiftDuckQueue(state, now);
       if (state.ducks.length === countBeforeGiftQueue) {
-        spawnCatchReplacementDuck(state, now);
+        state.pendingReplacementAt.push(now + CATCH_REPLACEMENT_DELAY_MS);
       }
     }
     cast.active = false;
@@ -578,16 +611,22 @@ function updateCast(state: GameState, dt: number): void {
   }
 }
 
-function spawnCatchReplacementDuck(state: GameState, now: number): void {
+function processCatchReplacementQueue(state: GameState, now: number): void {
+  const replacementAt = state.pendingReplacementAt[0];
+  if (replacementAt === undefined || now < replacementAt || duckNamingRequest) return;
+
   const variant = chooseDuckVariant(catchReplacementSpecialChance(state.mode));
-  addDuckIfCapacity(
-    state,
-    createDuck(state.mode === "guest" ? "guest" : "idle", {
-      variant,
-      catchableDelayMs: NEW_DUCK_CATCHABLE_DELAY_MS,
-      now
-    })
-  );
+  const duck = createDuck(state.mode === "guest" ? "guest" : "idle", {
+    variant,
+    catchableDelayMs: NEW_DUCK_CATCHABLE_DELAY_MS,
+    now
+  });
+  if (!addDuckIfCapacity(state, duck)) return;
+
+  state.pendingReplacementAt.shift();
+  if (state.mode === "twitch") {
+    requestDuckName(duck);
+  }
 }
 
 function handleSkillClick(state: GameState): void {
@@ -654,6 +693,7 @@ function pointerToCanvasPoint(event: MouseEvent): { x: number; y: number } {
 
 function finishGame(): void {
   if (!game) return;
+  duckNamingRequest = null;
   game.ended = true;
   if (session.authenticated) {
     addHighscore(session, {
@@ -690,7 +730,8 @@ function persistRun(state = game): void {
     lastGiftAt: state.lastGiftAt,
     lastDuckQuerySince: state.lastDuckQuerySince,
     processedGiftIds: [...state.processedGiftIds],
-    pendingGiftDucks: state.pendingGiftDucks
+    pendingGiftDucks: state.pendingGiftDucks,
+    pendingReplacementAt: state.pendingReplacementAt
   });
 }
 
@@ -732,6 +773,24 @@ function createDuck(source: Duck["source"], options: CreateDuckOptions = {}): Du
     caught: false,
     source
   };
+}
+
+function requestDuckName(duck: Duck, showAfter = Date.now()): void {
+  if (duckNamingRequest) return;
+  duckNamingRequest = { duckId: duck.id, showAfter };
+  if (showAfter <= Date.now()) renderOverlay();
+}
+
+function completeDuckNaming(name?: string): void {
+  if (!duckNamingRequest || !game) return;
+
+  const duck = game.ducks.find((candidate) => candidate.id === duckNamingRequest?.duckId);
+  const trimmedName = name?.trim().slice(0, 18);
+  if (duck && trimmedName) duck.name = trimmedName;
+
+  duckNamingRequest = null;
+  persistRun(game);
+  renderOverlay();
 }
 
 function draw(): void {
@@ -874,7 +933,7 @@ function drawGameObjects(state: GameState): void {
 
   drawSparkles(state);
 
-  if (!state.cast.active) {
+  if (!state.cast.active && !duckNamingRequest) {
     drawAimReticle(state);
   }
 
@@ -1186,6 +1245,21 @@ function drawHud(): void {
     const meterHeight = 20;
     ctx.fillStyle = "#1d0d07";
     ctx.fillRect(meterX - 5, meterY - 1, meterWidth + 10, meterHeight + 2);
+
+    if (duckNamingRequest) {
+      ctx.fillStyle = "rgba(37, 19, 10, 0.96)";
+      ctx.fillRect(meterX, meterY - 8, meterWidth, 36);
+      ctx.strokeStyle = "#ffd35e";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(meterX, meterY - 8, meterWidth, 36);
+      ctx.fillStyle = "#ffd35e";
+      ctx.font = "25px Consolas, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("ENTE BENENNEN", meterX + meterWidth / 2, meterY + 19);
+      ctx.textAlign = "left";
+      return;
+    }
+
     currentGame.previousVisibleSkillPower = currentGame.visibleSkillPower;
     currentGame.visibleSkillPower = currentGame.cast.power;
 
@@ -1252,7 +1326,10 @@ function easeOut(t: number): number {
 
 function renderOverlay(): void {
   overlayNode.innerHTML = "";
-  if (screen === "game") return;
+  if (screen === "game") {
+    renderDuckNamingPrompt();
+    return;
+  }
   if ((screen === "highscores" || screen === "settings") && !session.authenticated) {
     screen = "menu";
   }
@@ -1267,6 +1344,46 @@ function renderOverlay(): void {
   if (screen === "settings") renderSettings(panelNode);
 }
 
+function renderDuckNamingPrompt(): void {
+  if (!duckNamingRequest || !game) return;
+  if (Date.now() < duckNamingRequest.showAfter) return;
+  const duckExists = game.ducks.some((duck) => duck.id === duckNamingRequest?.duckId);
+  if (!duckExists) {
+    duckNamingRequest = null;
+    return;
+  }
+
+  const panelNode = document.createElement("div");
+  panelNode.className = "panel duck-name-panel";
+  panelNode.innerHTML = `
+    <form class="duck-name-form">
+      <label for="duck-name">Eine Auto-Spawn-Ente ist angekommen. Wie soll sie heissen?</label>
+      <input id="duck-name" name="duck-name" type="text" maxlength="18" autocomplete="off" placeholder="Entenname">
+      <div class="button-row">
+        <button type="submit">Name vergeben</button>
+        <button type="button" data-action="dismiss-duck-name">Ueberspringen</button>
+      </div>
+    </form>
+  `;
+  overlayNode.append(panelNode);
+
+  const form = panelNode.querySelector<HTMLFormElement>("form");
+  const input = panelNode.querySelector<HTMLInputElement>("#duck-name");
+  const dismissButton = panelNode.querySelector<HTMLButtonElement>('[data-action="dismiss-duck-name"]');
+
+  form?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    completeDuckNaming(input?.value);
+  });
+  dismissButton?.addEventListener("click", () => completeDuckNaming());
+  input?.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    completeDuckNaming();
+  });
+  input?.focus();
+}
+
 function renderMenu(node: HTMLElement): void {
   const userText = session.authenticated && session.user ? `Eingeloggt als ${session.user.displayName}` : "Nicht mit Twitch eingeloggt";
   const hasActiveRun = game !== null && !game.ended;
@@ -1278,11 +1395,11 @@ function renderMenu(node: HTMLElement): void {
       <button data-action="logout">Logout</button>
     `
     : "";
-  const disconnectedActions = session.channelConnected
+  const disconnectedActions = session.authenticated
     ? ""
     : `
       <button data-action="guest">Play as Guest</button>
-      <button data-action="login">${session.authenticated ? "Twitch neu verbinden" : "Twitch Login"}</button>
+      <button data-action="login">Twitch Login</button>
     `;
   node.innerHTML = `
     <h1>Kami Fishing</h1>

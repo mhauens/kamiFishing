@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CATCH_COOLDOWN_MS,
+  CATCH_REPLACEMENT_DELAY_MS,
   GUEST_SPECIAL_CHANCE,
   MAX_ACTIVE_DUCKS,
   NEW_DUCK_CATCHABLE_DELAY_MS,
@@ -77,6 +78,7 @@ describe("chooseDuckVariant", () => {
 describe("catch timing constants", () => {
   it("uses the configured cooldown and fresh duck protection durations", () => {
     expect(CATCH_COOLDOWN_MS).toBe(10_000);
+    expect(CATCH_REPLACEMENT_DELAY_MS).toBe(60_000);
     expect(NEW_DUCK_CATCHABLE_DELAY_MS).toBe(50_000);
     expect(SPECIAL_DUCK_SPEED_MULTIPLIER).toBeCloseTo(1.35);
   });
