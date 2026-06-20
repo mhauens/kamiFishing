@@ -51,6 +51,11 @@ describe("duckSpawnsFromGiftEvent", () => {
     expect(duckSpawnsFromGiftEvent(gift(25), 5).map((spawn) => spawn.variant)).toEqual(["special", "special", "normal"]);
   });
 
+  it("uses the configured special-duck threshold", () => {
+    expect(duckSpawnsFromGiftEvent(gift(15), 5, 15).map((spawn) => spawn.variant)).toEqual(["special"]);
+    expect(duckSpawnsFromGiftEvent(gift(14), 5, 15).map((spawn) => spawn.variant)).toEqual(["normal", "normal"]);
+  });
+
   it("uses Anonymous for anonymous gifts", () => {
     expect(duckSpawnsFromGiftEvent(gift(10, { anonymous: true, displayName: "" }), 5).every((spawn) => spawn.name === "Anonymous")).toBe(
       true

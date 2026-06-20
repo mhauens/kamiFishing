@@ -14,6 +14,7 @@ export type UserSession = {
 
 export type GameSettings = {
   subsPerDuck: number;
+  specialSubsPerDuck: number;
   guestDuckIntervalSeconds: number;
   twitchIdleDuckSeconds: number;
   duckEventPollSeconds: number;

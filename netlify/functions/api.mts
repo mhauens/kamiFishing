@@ -328,6 +328,7 @@ function sessionPayload(session: Session | null) {
 function defaultSettings() {
   return {
     subsPerDuck: intEnv("DEFAULT_SUBS_PER_DUCK", 5),
+    specialSubsPerDuck: intEnv("DEFAULT_SPECIAL_SUBS_PER_DUCK", 10),
     guestDuckIntervalSeconds: intEnv("DEFAULT_GUEST_DUCK_INTERVAL_SECONDS", 12),
     twitchIdleDuckSeconds: intEnv("DEFAULT_TWITCH_IDLE_DUCK_SECONDS", 60),
     duckEventPollSeconds: intEnv("DUCK_EVENT_POLL_SECONDS", 15)

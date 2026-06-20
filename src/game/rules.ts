@@ -26,11 +26,16 @@ export function sanitizeSettingsValue(value: number, fallback: number, min: numb
   return clampNumber(Math.round(value || fallback), min, max);
 }
 
-export function duckSpawnsFromGiftEvent(event: GiftEvent, subsPerDuck: number): DuckSpawnInstruction[] {
+export function duckSpawnsFromGiftEvent(
+  event: GiftEvent,
+  subsPerDuck: number,
+  specialSubsPerDuck = SPECIAL_GIFT_SUB_THRESHOLD
+): DuckSpawnInstruction[] {
   const threshold = sanitizeSettingsValue(subsPerDuck, 5, 1, 100);
+  const specialThreshold = sanitizeSettingsValue(specialSubsPerDuck, SPECIAL_GIFT_SUB_THRESHOLD, 1, 1000);
   const total = Math.max(0, event.total);
-  const specialCopies = Math.floor(total / SPECIAL_GIFT_SUB_THRESHOLD);
-  const remainingSubs = total - specialCopies * SPECIAL_GIFT_SUB_THRESHOLD;
+  const specialCopies = Math.floor(total / specialThreshold);
+  const remainingSubs = total - specialCopies * specialThreshold;
   const normalCopies = Math.floor(remainingSubs / threshold);
   const name = event.anonymous ? "Anonymous" : event.displayName.trim() || "Anonymous";
 
@@ -53,8 +58,12 @@ export function duckSpawnsFromGiftEvent(event: GiftEvent, subsPerDuck: number): 
   return [...specialSpawns, ...normalSpawns];
 }
 
-export function pendingGiftDucksFromEvent(event: GiftEvent, subsPerDuck: number): PendingGiftDuck[] {
-  const spawns = duckSpawnsFromGiftEvent(event, subsPerDuck);
+export function pendingGiftDucksFromEvent(
+  event: GiftEvent,
+  subsPerDuck: number,
+  specialSubsPerDuck = SPECIAL_GIFT_SUB_THRESHOLD
+): PendingGiftDuck[] {
+  const spawns = duckSpawnsFromGiftEvent(event, subsPerDuck, specialSubsPerDuck);
   const eventHasSpecial = spawns.some((spawn) => spawn.variant === "special");
 
   return spawns.map((spawn, index) => ({

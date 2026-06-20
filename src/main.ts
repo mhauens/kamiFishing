@@ -492,7 +492,7 @@ async function pollGiftEvents(state: GameState, now: number): Promise<void> {
 }
 
 function enqueueGiftEventDucks(state: GameState, event: GiftEvent): void {
-  const pendingDucks = pendingGiftDucksFromEvent(event, settings.subsPerDuck);
+  const pendingDucks = pendingGiftDucksFromEvent(event, settings.subsPerDuck, settings.specialSubsPerDuck);
   if (pendingDucks.length === 0) return;
 
   const now = Date.now();
@@ -1454,14 +1454,40 @@ function renderHighscores(node: HTMLElement): void {
 }
 
 function renderSettings(node: HTMLElement): void {
+  const showGuestSettings = !game || game.mode === "guest";
+  const showTwitchSettings = !game || game.mode === "twitch";
   node.innerHTML = `
     <h2>Settings</h2>
     <p class="hint">Diese Werte bleiben lokal in deinem Browser. Gift-Sub-Events werden roh geholt und hier in Enten umgerechnet.</p>
     <div class="settings-grid">
-      <label>Subs pro Ente <input data-setting="subsPerDuck" type="number" min="1" max="100" value="${settings.subsPerDuck}"></label>
-      <label>Guest Enten-Intervall (Sek.) <input data-setting="guestDuckIntervalSeconds" type="number" min="3" max="120" value="${settings.guestDuckIntervalSeconds}"></label>
-      <label>Twitch Idle-Ente nach (Sek.) <input data-setting="twitchIdleDuckSeconds" type="number" min="15" max="900" value="${settings.twitchIdleDuckSeconds}"></label>
-      <label>Gift-Event Polling (Sek.) <input data-setting="duckEventPollSeconds" type="number" min="10" max="120" value="${settings.duckEventPollSeconds}"></label>
+      <label>
+        <span>Subs pro Ente</span>
+        <small>So viele Gift-Subs erzeugen eine normale Ente, nachdem Special-Enten abgezogen wurden.</small>
+        <input data-setting="subsPerDuck" type="number" min="1" max="100" value="${settings.subsPerDuck}">
+      </label>
+      <label>
+        <span>Subs fuer Special-Ente</span>
+        <small>So viele Gift-Subs erzeugen eine schnelle Special-Ente. Standard: 10.</small>
+        <input data-setting="specialSubsPerDuck" type="number" min="1" max="1000" value="${settings.specialSubsPerDuck}">
+      </label>
+      ${
+        showGuestSettings
+          ? `<label>
+              <span>Guest Enten-Intervall (Sek.)</span>
+              <small>Zeit zwischen automatischen Enten in einem Guest-Run.</small>
+              <input data-setting="guestDuckIntervalSeconds" type="number" min="3" max="120" value="${settings.guestDuckIntervalSeconds}">
+            </label>`
+          : ""
+      }
+      ${
+        showTwitchSettings
+          ? `<label>
+              <span>Twitch Idle-Ente nach (Sek.)</span>
+              <small>Erzeugt eine Auto-Ente, wenn so lange kein Gift-Sub-Event eingetroffen ist.</small>
+              <input data-setting="twitchIdleDuckSeconds" type="number" min="15" max="900" value="${settings.twitchIdleDuckSeconds}">
+            </label>`
+          : ""
+      }
     </div>
     <div class="button-row">
       <button data-action="save-settings">Save</button>

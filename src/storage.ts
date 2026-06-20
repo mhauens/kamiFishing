@@ -6,6 +6,7 @@ const SETTINGS_KEY = "kamiFishing.settings";
 
 const DEFAULT_SETTINGS: GameSettings = {
   subsPerDuck: 5,
+  specialSubsPerDuck: 10,
   guestDuckIntervalSeconds: 12,
   twitchIdleDuckSeconds: 60,
   duckEventPollSeconds: 15
@@ -32,6 +33,7 @@ export function saveSettings(settings: GameSettings): GameSettings {
 export function normalizeSettings(settings: GameSettings): GameSettings {
   return {
     subsPerDuck: sanitizeSettingsValue(settings.subsPerDuck, 5, 1, 100),
+    specialSubsPerDuck: sanitizeSettingsValue(settings.specialSubsPerDuck, 10, 1, 1000),
     guestDuckIntervalSeconds: sanitizeSettingsValue(settings.guestDuckIntervalSeconds, 12, 3, 120),
     twitchIdleDuckSeconds: sanitizeSettingsValue(settings.twitchIdleDuckSeconds, 60, 15, 900),
     duckEventPollSeconds: sanitizeSettingsValue(settings.duckEventPollSeconds, 15, 10, 120)

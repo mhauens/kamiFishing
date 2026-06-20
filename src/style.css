@@ -144,6 +144,12 @@ canvas {
   gap: 7px;
 }
 
+.settings-grid small {
+  color: #d7bd84;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .score-list {
   display: grid;
   gap: 8px;
